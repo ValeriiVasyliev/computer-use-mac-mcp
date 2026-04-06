@@ -1,0 +1,30 @@
+{
+  "name": "@ks-jarvis/computer-use-mcp",
+  "version": "0.1.0",
+  "description": "MCP server + tool definitions + session dispatcher for Claude computer-use",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./types": {
+      "types": "./types.d.ts",
+      "default": "./types.js"
+    },
+    "./sentinelApps": {
+      "types": "./sentinelApps.d.ts",
+      "default": "./sentinelApps.js"
+    }
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": ">=1.0.0"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.3"
+  },
+  "keywords": ["macos", "computer-use", "mcp", "claude", "automation"]
+}

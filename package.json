@@ -1,0 +1,22 @@
+{
+  "name": "computer-use-mac-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for macOS desktop automation — screenshot, mouse, keyboard control via JXA/CoreGraphics",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "computer-use-mac-mcp": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": ["darwin"],
+  "keywords": ["macos", "mcp", "computer-use", "automation", "screenshot", "mouse", "keyboard", "claude"],
+  "license": "MIT"
+}
