@@ -75,10 +75,12 @@ function safeUnlink(p) {
  * Uses screencapture (always native Retina resolution) then sips to resize
  * to the requested targetW×targetH.
  */
-async function screenshotToBase64(targetW, targetH) {
+async function screenshotToBase64(targetW, targetH, displayId) {
   const path = tempPath()
+  // screencapture -D uses 1-indexed display numbers; our displayId is 0-indexed
+  const displayArgs = (displayId != null && displayId > 0) ? ['-D', String(displayId + 1)] : []
   try {
-    await execFileAsync('screencapture', ['-t', 'jpg', '-x', path])
+    await execFileAsync('screencapture', ['-t', 'jpg', '-x', ...displayArgs, path])
 
     // Check actual dims
     const dimsOut = execFileSync(
@@ -210,9 +212,9 @@ export const screenshot = {
    * @param {number} _quality - JPEG quality (0-1); screencapture uses its own default
    * @param {number} targetW - desired output width in pixels
    * @param {number} targetH - desired output height in pixels
-   * @param {number} [_displayId] - ignored (always captures main display)
+   * @param {number} [displayId] - 0-indexed display to capture (0 = main, 1 = first external, …)
    */
-  async captureExcluding(allowedBundleIds, _quality, targetW, targetH, _displayId) {
+  async captureExcluding(allowedBundleIds, _quality, targetW, targetH, displayId) {
     // Activate the first allowed app so the screenshot shows the target, not the terminal
     if (allowedBundleIds?.length > 0) {
       try {
@@ -222,7 +224,7 @@ export const screenshot = {
         await new Promise(r => setTimeout(r, 300))
       } catch (_) {}
     }
-    return screenshotToBase64(targetW, targetH)
+    return screenshotToBase64(targetW, targetH, displayId)
   },
 
   /**
