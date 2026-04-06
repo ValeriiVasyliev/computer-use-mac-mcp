@@ -36,6 +36,16 @@ npm install
 # 3. Add to your MCP client config (see below)
 ```
 
+### Claude Code CLI
+
+`computer-use` is a reserved name in Claude Code CLI. Use a different name:
+
+```bash
+claude mcp add -s user mac-control /path/to/node /path/to/computer-use-mac-mcp/index.js
+```
+
+Tools will be available as `mcp__mac-control__screenshot`, `mcp__mac-control__left_click`, etc.
+
 ### Claude Desktop
 
 Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:

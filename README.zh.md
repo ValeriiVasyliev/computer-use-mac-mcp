@@ -34,6 +34,16 @@ cd computer-use-mac-mcp
 npm install
 ```
 
+### Claude Code CLI
+
+官方 Claude Code CLI 保留了 `computer-use` 这个名称，需要换个名字添加：
+
+```bash
+claude mcp add -s user mac-control /path/to/node /path/to/computer-use-mac-mcp/index.js
+```
+
+添加后工具名为 `mcp__mac-control__screenshot`、`mcp__mac-control__left_click` 等。
+
 ### Claude Desktop 配置
 
 编辑 `~/Library/Application Support/Claude/claude_desktop_config.json`：
