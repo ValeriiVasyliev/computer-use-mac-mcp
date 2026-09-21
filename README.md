@@ -1,7 +1,5 @@
 # computer-use-mac-mcp
 
-[中文文档](./README.zh.md) | English
-
 > MCP server for macOS desktop automation — screenshot, click, type, scroll and more.
 
 Gives Claude (or any MCP-compatible agent) the ability to see and control your Mac. Implements the standard `mcp__computer-use__*` tool interface so it works with Claude Desktop, Claude Code, Cursor, and any other MCP client — **no API key required at the tool level**.

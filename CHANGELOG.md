@@ -68,7 +68,6 @@ addons — `screencapture`, `osascript` (JXA/AppKit) and CoreGraphics CGEvent.
 - CJK / Unicode text input routed through clipboard paste, fixing garbled
   Chinese/Japanese/Korean output from `type`.
 - Multi-monitor support through `switch_display`.
-- Chinese README (`README.zh.md`) with cross-language links.
 
 ### Fixed
 
