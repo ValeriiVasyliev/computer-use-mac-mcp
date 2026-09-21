@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-09-21
+
 ### Security
 
 - Refuse to click, type or capture while a password manager, credential prompt
@@ -112,6 +116,7 @@ addons — `screencapture`, `osascript` (JXA/AppKit) and CoreGraphics CGEvent.
 - Noted that `computer-use` is a reserved server name in the Claude Code CLI, so
   a different name must be used when registering the server there.
 
-[Unreleased]: https://github.com/ValeriiVasyliev/computer-use-mac-mcp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ValeriiVasyliev/computer-use-mac-mcp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ValeriiVasyliev/computer-use-mac-mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ValeriiVasyliev/computer-use-mac-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ValeriiVasyliev/computer-use-mac-mcp/releases/tag/v0.1.0

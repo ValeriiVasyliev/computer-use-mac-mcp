@@ -1,6 +1,6 @@
 {
   "name": "computer-use-mac-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server for macOS desktop automation — screenshot, mouse, keyboard control via JXA/CoreGraphics",
   "type": "module",
   "main": "index.js",
