@@ -26,14 +26,14 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 
 import {
-  API_RESIZE_PARAMS,
   bindSessionContext,
   buildComputerUseTools,
   createSubprocessCtx,
-  targetImageSize,
 } from './packages/computer-use-mcp/index.js'
 import * as cuInput from './packages/computer-use-input/index.js'
 import * as cuSwift from './packages/computer-use-swift/index.js'
+import * as geometry from './packages/computer-use-geometry/index.js'
+import { createFrameTracker } from './lib/freshness.js'
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -59,9 +59,16 @@ async function writeClipboard(text) {
 
 const MOVE_SETTLE_MS = 50
 
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+/** Settles after input and retries once on a stale (unchanged) frame. */
+const frames = createFrameTracker()
+const markInput = () => frames.markInput()
+
 async function moveAndSettle(x, y) {
   await cuInput.moveMouse(x, y, false)
-  await new Promise(r => setTimeout(r, MOVE_SETTLE_MS))
+  markInput()
+  await sleep(MOVE_SETTLE_MS)
 }
 
 async function typeViaClipboard(text) {
@@ -79,10 +86,9 @@ async function typeViaClipboard(text) {
   }
 }
 
-function computeTargetDims(logicalW, logicalH, scaleFactor) {
-  const physW = Math.round(logicalW * scaleFactor)
-  const physH = Math.round(logicalH * scaleFactor)
-  return targetImageSize(physW, physH, API_RESIZE_PARAMS)
+/** Output pixel size for a capture of `w`×`h` POINTS on the given display. */
+function outputDimsForPoints(w, h, scaleFactor) {
+  return geometry.fitWithin(Math.round(w * scaleFactor), Math.round(h * scaleFactor))
 }
 
 function createExecutor() {
@@ -102,14 +108,19 @@ function createExecutor() {
     },
 
     async screenshot({ allowedBundleIds, displayId }) {
-      const d = cuSwift.display.getSize(displayId)
-      const [tw, th] = computeTargetDims(d.width, d.height, d.scaleFactor)
-      return cuSwift.screenshot.captureExcluding(allowedBundleIds, 0.75, tw, th, displayId)
+      // Screenshot size comes from the same geometry record the pointer layer
+      // maps against, so the two spaces cannot drift apart.
+      const display = geometry.getDisplay(displayId)
+      const { width, height } = geometry.screenshotSize(display)
+
+      return frames.capture(() =>
+        cuSwift.screenshot.captureExcluding(allowedBundleIds, 0.75, width, height, displayId))
     },
 
     async zoom(region, allowedBundleIds, displayId) {
+      // `region` is already in GLOBAL POINTS (computed by the geometry layer).
       const d = cuSwift.display.getSize(displayId)
-      const [outW, outH] = computeTargetDims(region.w, region.h, d.scaleFactor)
+      const [outW, outH] = outputDimsForPoints(region.w, region.h, d.scaleFactor)
       return cuSwift.screenshot.captureRegion(
         allowedBundleIds, region.x, region.y, region.w, region.h, outW, outH, 0.75, displayId,
       )
@@ -128,6 +139,7 @@ function createExecutor() {
       } else {
         await cuInput.mouseButton(button, 'click', count)
       }
+      markInput()
     },
 
     async moveMouse(x, y) {
@@ -139,13 +151,14 @@ function createExecutor() {
       await cuInput.mouseButton('left', 'press')
       await new Promise(r => setTimeout(r, MOVE_SETTLE_MS))
       try { await moveAndSettle(to.x, to.y) }
-      finally { await cuInput.mouseButton('left', 'release') }
+      finally { await cuInput.mouseButton('left', 'release'); markInput() }
     },
 
     async scroll(x, y, dx, dy) {
       await moveAndSettle(x, y)
       if (dy !== 0) await cuInput.mouseScroll(dy, 'vertical')
       if (dx !== 0) await cuInput.mouseScroll(dx, 'horizontal')
+      markInput()
     },
 
     async key(sequence, repeat = 1) {
@@ -154,6 +167,7 @@ function createExecutor() {
         if (i > 0) await new Promise(r => setTimeout(r, 8))
         await cuInput.keys(parts)
       }
+      markInput()
     },
 
     async holdKey(keyNames, durationMs) {
@@ -163,6 +177,7 @@ function createExecutor() {
         await new Promise(r => setTimeout(r, durationMs))
       } finally {
         for (const k of [...pressed].reverse()) { await cuInput.key(k, 'release').catch(() => {}) }
+        markInput()
       }
     },
 
@@ -172,6 +187,7 @@ function createExecutor() {
       } else {
         await cuInput.typeText(text)
       }
+      markInput()
     },
 
     async getCursorPosition() {

@@ -96,7 +96,38 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ## Coordinate System
 
-Coordinates are in **screenshot-space pixels**. Always call `screenshot` first — the server caches the display dimensions and uses them to correctly map click coordinates to physical pixels (including Retina 2× scaling).
+Every coordinate in the public API is in **screenshot space**: `(0, 0)` is the
+top-left of the image returned by `screenshot`, and `(width, height)` is its
+bottom-right. `cursor_position` reports in that same space, so a value it
+returns can be passed straight back to `left_click` or `mouse_move`.
+
+Internally there is exactly one conversion, in
+`packages/computer-use-geometry`, from screenshot space to **global points** —
+the coordinate space CoreGraphics mouse events and `screencapture -R` use:
+
+```
+globalX = display.origin.x + x * (display.widthInPoints  / screenshot.width)
+globalY = display.origin.y + y * (display.heightInPoints / screenshot.height)
+```
+
+Note there is no `backingScaleFactor` term: the Retina scale factor is already
+absorbed by the screenshot's own pixel dimensions. Nothing is hard-coded to 2×,
+so Retina, non-Retina, and mixed-DPI multi-display arrangements all work, and
+display origins (including negative ones, for screens placed left of or above
+the primary) are honoured.
+
+Screenshot size and pointer mapping are derived from the same display record, so
+the two spaces cannot drift apart. Calling `screenshot` first is no longer
+required for correct clicking — if no screenshot has been taken yet, the mapping
+is derived from live display geometry.
+
+Verify it on your own hardware:
+
+```bash
+npm run calibrate   # moves the cursor only; no clicks, no keystrokes
+```
+
+Set `CU_DEBUG_COORDS=1` to trace every conversion on stderr.
 
 ## Multi-monitor
 

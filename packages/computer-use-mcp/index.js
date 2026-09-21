@@ -16,6 +16,14 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 
+import * as geometry from '../computer-use-geometry/index.js'
+
+/** Coordinate tracing is noisy; opt in with CU_DEBUG_COORDS=1. */
+const DEBUG_COORDS = process.env.CU_DEBUG_COORDS === '1'
+function traceCoords(msg) {
+  if (DEBUG_COORDS) process.stderr.write(`[CU-COORD] ${msg}\n`)
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /**
@@ -34,6 +42,13 @@ export const DEFAULT_GRANT_FLAGS = {
  */
 export const API_RESIZE_PARAMS = {}
 
+/**
+ * Side length of the zoom window, expressed in SCREENSHOT pixels. Converting it
+ * through the display rect keeps the zoom factor identical on Retina and
+ * non-Retina displays.
+ */
+export const ZOOM_BOX_SHOT_PX = 200
+
 /** Sentinel category for apps that should never be controlled. Returns null. */
 export function getSentinelCategory() {
   return null
@@ -41,15 +56,15 @@ export function getSentinelCategory() {
 
 /**
  * Compute the target image dimensions for a screenshot.
- * physW/physH = display.width * scaleFactor.
+ * physW/physH = the display's native pixel dimensions.
  * We cap at 1280×800 to keep token costs reasonable while still giving
  * Claude a usable coordinate space.
+ *
+ * Delegates to computer-use-geometry so screenshot sizing and coordinate
+ * mapping can never drift apart.
  */
 export function targetImageSize(physW, physH, _params) {
-  const MAX_W = 1280
-  const MAX_H = 800
-  const scale = Math.min(MAX_W / physW, MAX_H / physH, 1)
-  return [Math.round(physW * scale), Math.round(physH * scale)]
+  return geometry.fitWithin(physW, physH)
 }
 
 // ── Tool definitions ───────────────────────────────────────────────────────
@@ -392,37 +407,43 @@ export function createComputerUseMcpServer(adapter, coordinateMode) {
 export function bindSessionContext(adapter, coordinateMode, ctx) {
   const { executor } = adapter
 
-  /** Convert screenshot-space coords to physical pixels based on mode. */
-  function toPixels(x, y, _displayId) {
-    // Use cached screenshot dims (set after each screenshot call) for both modes.
-    // This avoids calling the async executor.getDisplaySize() from a sync context.
-    const dims = ctx.getLastScreenshotDims?.()
-    process.stderr.write(`[CU-COORD] toPixels in=(${x},${y}) mode=${coordinateMode} dims=${JSON.stringify(dims)}\n`)
-    if (dims && dims.width > 0) {
-      if (coordinateMode === 'normalized') {
-        // normalized: 0..1 fraction → physical pixels
-        const result = {
-          x: Math.round(x * dims.displayWidth),
-          y: Math.round(y * dims.displayHeight),
-        }
-        process.stderr.write(`[CU-COORD] toPixels normalized out=(${result.x},${result.y})\n`)
-        return result
-      }
-      // pixels: screenshot-space → physical pixels
-      const result = {
-        x: Math.round(x * dims.displayWidth / dims.width),
-        y: Math.round(y * dims.displayHeight / dims.height),
-      }
-      process.stderr.write(`[CU-COORD] toPixels pixels out=(${result.x},${result.y}) ratio=(${dims.displayWidth}/${dims.width}=${(dims.displayWidth/dims.width).toFixed(3)}, ${dims.displayHeight}/${dims.height}=${(dims.displayHeight/dims.height).toFixed(3)})\n`)
-      return result
+  /**
+   * The screenshot dimensions that incoming coordinates are expressed in.
+   *
+   * Prefers the dims of the screenshot the model actually saw. If no screenshot
+   * has been taken yet, it is derived from live display geometry rather than
+   * passing coordinates through unconverted (which silently produced
+   * off-by-scaleFactor pointer positions).
+   */
+  function currentShot(displayId) {
+    const cached = ctx.getLastScreenshotDims?.()
+    if (cached && cached.width > 0 && cached.height > 0 &&
+        (cached.displayId ?? 0) === (displayId ?? 0)) {
+      return { width: cached.width, height: cached.height }
     }
-    // Fallback: no screenshot taken yet — pass through unchanged
-    process.stderr.write(`[CU-COORD] toPixels FALLBACK (no dims cached) in=(${x},${y})\n`)
-    if (coordinateMode === 'normalized') {
-      const [tw, th] = targetImageSize(1920 * 2, 1080 * 2, API_RESIZE_PARAMS)
-      return { x: Math.round(x * tw), y: Math.round(y * th) }
-    }
-    return { x, y }
+    return geometry.screenshotSize(geometry.getDisplay(displayId))
+  }
+
+  /**
+   * Convert a public API coordinate into GLOBAL POINTS — the space the CG mouse
+   * APIs and `screencapture -R` use. This is the one and only conversion applied
+   * to incoming coordinates.
+   */
+  function toPoints(x, y, displayId) {
+    const display = geometry.getDisplay(displayId)
+    const shot = currentShot(displayId)
+
+    // normalized mode addresses the display as a 0..1 fraction
+    const sx = coordinateMode === 'normalized' ? x * shot.width : x
+    const sy = coordinateMode === 'normalized' ? y * shot.height : y
+
+    const pt = geometry.screenshotToPoints(sx, sy, shot, display)
+    traceCoords(
+      `toPoints in=(${x},${y}) mode=${coordinateMode} shot=${shot.width}x${shot.height} ` +
+      `display#${display.index} rect=(${display.points.x},${display.points.y},` +
+      `${display.points.w},${display.points.h}) sf=${display.scaleFactor} => points=(${pt.x.toFixed(1)},${pt.y.toFixed(1)})`,
+    )
+    return pt
   }
 
   function getAllowedBundleIds() {
@@ -463,22 +484,28 @@ export function bindSessionContext(adapter, coordinateMode, ctx) {
         // ── screenshot ─────────────────────────────────────────────────────
         case 'screenshot': {
           const allowedBundleIds = getAllowedBundleIds()
-          process.stderr.write(`[CU-COORD] screenshot allowedBundleIds=${JSON.stringify(allowedBundleIds)} displayId=${displayId}\n`)
           const result = await executor.screenshot({ allowedBundleIds, displayId })
 
-          // Report dims so the host can scale click coordinates correctly
-          const d = (await executor.getDisplaySize?.(displayId)) ??
-            { width: result.width, height: result.height, scaleFactor: 1 }
+          // Record the geometry this screenshot was taken against so that
+          // subsequent coordinates are mapped against the very same rect.
+          const display = geometry.getDisplay(displayId)
           const storedDims = {
             width: result.width,
             height: result.height,
-            displayWidth: Math.round(d.width * (d.scaleFactor ?? 1)),
-            displayHeight: Math.round(d.height * (d.scaleFactor ?? 1)),
+            displayWidth: display.pixels.w,
+            displayHeight: display.pixels.h,
+            pointsWidth: display.points.w,
+            pointsHeight: display.points.h,
             displayId: displayId ?? 0,
-            originX: 0,
-            originY: 0,
+            originX: display.points.x,
+            originY: display.points.y,
+            scaleFactor: display.scaleFactor,
           }
-          process.stderr.write(`[CU-COORD] screenshot result=${result.width}x${result.height} display(logical)=${d.width}x${d.height} sf=${d.scaleFactor} displayId=${displayId} => stored displayPhys=${storedDims.displayWidth}x${storedDims.displayHeight}\n`)
+          traceCoords(
+            `screenshot ${result.width}x${result.height} display#${display.index} ` +
+            `points=(${display.points.x},${display.points.y},${display.points.w},${display.points.h}) ` +
+            `pixels=${display.pixels.w}x${display.pixels.h} sf=${display.scaleFactor}`,
+          )
           ctx.onScreenshotCaptured(storedDims)
 
           return {
@@ -489,29 +516,28 @@ export function bindSessionContext(adapter, coordinateMode, ctx) {
 
         // ── left_click ────────────────────────────────────────────────────
         case 'left_click': {
-          const { x, y } = toPixels(a.x, a.y, displayId)
-          process.stderr.write(`[CU-COORD] left_click physical=(${x},${y}) from screenshot-space=(${a.x},${a.y})\n`)
+          const { x, y } = toPoints(a.x, a.y, displayId)
           await executor.click(x, y, 'left', 1, a.modifiers ?? [])
           return ok(`Clicked at (${a.x}, ${a.y})`)
         }
 
         // ── right_click ───────────────────────────────────────────────────
         case 'right_click': {
-          const { x, y } = toPixels(a.x, a.y, displayId)
+          const { x, y } = toPoints(a.x, a.y, displayId)
           await executor.click(x, y, 'right', 1)
           return ok(`Right-clicked at (${a.x}, ${a.y})`)
         }
 
         // ── middle_click ──────────────────────────────────────────────────
         case 'middle_click': {
-          const { x, y } = toPixels(a.x, a.y, displayId)
+          const { x, y } = toPoints(a.x, a.y, displayId)
           await executor.click(x, y, 'middle', 1)
           return ok(`Middle-clicked at (${a.x}, ${a.y})`)
         }
 
         // ── double_click ──────────────────────────────────────────────────
         case 'double_click': {
-          const { x, y } = toPixels(a.x, a.y, displayId)
+          const { x, y } = toPoints(a.x, a.y, displayId)
           await executor.click(x, y, 'left', 2)
           return ok(`Double-clicked at (${a.x}, ${a.y})`)
         }
@@ -519,11 +545,11 @@ export function bindSessionContext(adapter, coordinateMode, ctx) {
         // ── left_click_drag ───────────────────────────────────────────────
         case 'left_click_drag': {
           const [ex, ey] = a.coordinate
-          const end = toPixels(ex, ey, displayId)
+          const end = toPoints(ex, ey, displayId)
           let start
           if (Array.isArray(a.start_coordinate)) {
             const [sx, sy] = a.start_coordinate
-            start = toPixels(sx, sy, displayId)
+            start = toPoints(sx, sy, displayId)
           }
           await executor.drag(start, end)
           return ok(`Dragged to (${ex}, ${ey})`)
@@ -573,30 +599,52 @@ export function bindSessionContext(adapter, coordinateMode, ctx) {
 
         // ── mouse_move ────────────────────────────────────────────────────
         case 'mouse_move': {
-          const { x, y } = toPixels(a.x, a.y, displayId)
+          const { x, y } = toPoints(a.x, a.y, displayId)
           await executor.moveMouse(x, y)
           return ok(`Moved mouse to (${a.x}, ${a.y})`)
         }
 
         // ── scroll ────────────────────────────────────────────────────────
         case 'scroll': {
-          const { x, y } = toPixels(a.x, a.y, displayId)
+          const { x, y } = toPoints(a.x, a.y, displayId)
           await executor.scroll(x, y, a.horizontal_distance ?? 0, a.vertical_distance ?? 0)
           return ok(`Scrolled at (${a.x}, ${a.y})`)
         }
 
         // ── cursor_position ───────────────────────────────────────────────
         case 'cursor_position': {
-          const pos = await executor.getCursorPosition()
-          return ok(JSON.stringify(pos))
+          // executor reports GLOBAL POINTS; convert back into the same
+          // screenshot space the model addresses, so a value returned here can
+          // be handed straight back to left_click / mouse_move.
+          const pt = await executor.getCursorPosition()
+          const display = geometry.displayContainingPoint(pt.x, pt.y)
+            ?? geometry.getDisplay(displayId)
+          const shot = currentShot(display.index)
+          const s = geometry.pointsToScreenshot(pt.x, pt.y, shot, display)
+          traceCoords(
+            `cursor_position points=(${pt.x.toFixed(1)},${pt.y.toFixed(1)}) ` +
+            `display#${display.index} => screenshot=(${s.x.toFixed(1)},${s.y.toFixed(1)})`,
+          )
+          return ok(JSON.stringify({
+            x: Math.round(s.x),
+            y: Math.round(s.y),
+            display: display.index,
+          }))
         }
 
         // ── zoom ──────────────────────────────────────────────────────────
         case 'zoom': {
           const [cx, cy] = a.coordinate
-          const { x: px, y: py } = toPixels(cx, cy, displayId)
-          const regionPx = 400
-          const region = { x: px - regionPx / 2, y: py - regionPx / 2, w: regionPx, h: regionPx }
+          const display = geometry.getDisplay(displayId)
+          const shot = currentShot(displayId)
+          // Region is sized in screenshot units and converted to POINTS, which
+          // is what `screencapture -R` expects. Passing pixels here previously
+          // produced rects outside the display bounds on Retina screens.
+          const region = geometry.zoomRegionPoints(cx, cy, shot, display, ZOOM_BOX_SHOT_PX)
+          traceCoords(
+            `zoom center=(${cx},${cy}) => region points=` +
+            `(${region.x.toFixed(1)},${region.y.toFixed(1)},${region.w.toFixed(1)},${region.h.toFixed(1)})`,
+          )
           const result = await executor.zoom(region, getAllowedBundleIds(), displayId)
           return {
             content: [{ type: 'image', mimeType: 'image/jpeg', data: result.base64 }],

@@ -1,7 +1,17 @@
 export interface DisplayGeometry {
+  /** Display width in POINTS (not pixels). */
   width: number
+  /** Display height in POINTS (not pixels). */
   height: number
+  /** Retina backing scale factor. */
   scaleFactor: number
+  /** 0-based index; 0 is the primary display. */
+  index?: number
+  cgDisplayId?: number | null
+  /** Display rect in global points, top-left origin. */
+  points?: { x: number; y: number; w: number; h: number }
+  /** Native pixel dimensions = points × scaleFactor. */
+  pixels?: { w: number; h: number }
 }
 
 export interface ScreenshotResult {
@@ -33,8 +43,11 @@ export interface ComputerUseAPI {
     checkScreenRecording(): boolean
   }
   display: {
+    /** Geometry for one display; width/height are in POINTS. */
     getSize(displayId?: number): DisplayGeometry
     listAll(): DisplayGeometry[]
+    /** Re-read geometry after a display hot-plug or resolution change. */
+    refresh(): DisplayGeometry[]
   }
   screenshot: {
     captureExcluding(
@@ -44,6 +57,7 @@ export interface ComputerUseAPI {
       targetH: number,
       displayId?: number,
     ): Promise<ScreenshotResult>
+    /** x, y, w, h are in GLOBAL POINTS (top-left origin), as `screencapture -R` expects. */
     captureRegion(
       allowedBundleIds: string[],
       x: number,

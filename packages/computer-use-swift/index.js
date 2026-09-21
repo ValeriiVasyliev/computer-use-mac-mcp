@@ -16,6 +16,8 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { promisify } from 'util'
 
+import * as geometry from '../computer-use-geometry/index.js'
+
 const execFileAsync = promisify(execFile)
 
 function jxa(script) {
@@ -30,32 +32,23 @@ function jxaSync(script) {
   ).trim()
 }
 
-// ── Display info (sync, cached) ────────────────────────────────────────────
+// ── Display info ───────────────────────────────────────────────────────────
+//
+// Display geometry comes from computer-use-geometry so that screenshot sizing
+// and pointer mapping are derived from one shared record rather than each
+// re-querying the window server and guessing independently.
 
-let _displayCache = null
-
-function refreshDisplayInfo() {
-  const out = jxaSync(`
-    ObjC.import("AppKit");
-    var screens = $.NSScreen.screens;
-    var result = [];
-    for (var i = 0; i < screens.count; i++) {
-      var s = screens.objectAtIndex(i);
-      var f = s.frame;
-      result.push({
-        width: f.size.width,
-        height: f.size.height,
-        scaleFactor: s.backingScaleFactor
-      });
-    }
-    JSON.stringify(result);
-  `)
-  _displayCache = JSON.parse(out)
-  return _displayCache
-}
-
-function getDisplayInfo() {
-  return _displayCache ?? refreshDisplayInfo()
+/** Legacy shape ({width,height,scaleFactor} in points) plus the full record. */
+function toLegacyShape(d) {
+  return {
+    width: d.points.w,
+    height: d.points.h,
+    scaleFactor: d.scaleFactor,
+    index: d.index,
+    cgDisplayId: d.cgDisplayId,
+    points: d.points,
+    pixels: d.pixels,
+  }
 }
 
 // ── Screenshot helpers ─────────────────────────────────────────────────────
@@ -70,77 +63,40 @@ function safeUnlink(p) {
   try { if (existsSync(p)) unlinkSync(p) } catch { /* ignore */ }
 }
 
-/**
- * Take a full-screen JPEG screenshot and return it as base64.
- * Uses screencapture (always native Retina resolution) then sips to resize
- * to the requested targetW×targetH.
- */
-async function screenshotToBase64(targetW, targetH, displayId) {
-  const path = tempPath()
-  // screencapture -D uses 1-indexed display numbers; our displayId is 0-indexed
-  const displayArgs = (displayId != null && displayId > 0) ? ['-D', String(displayId + 1)] : []
-  try {
-    await execFileAsync('screencapture', ['-t', 'jpg', '-x', ...displayArgs, path])
+/** Resize `path` to exactly outW×outH if it isn't already, returning a path. */
+async function resizeIfNeeded(path, outW, outH) {
+  const dimsOut = execFileSync(
+    'sips',
+    ['-g', 'pixelWidth', '-g', 'pixelHeight', path],
+    { encoding: 'utf8' },
+  )
+  const actualW = parseInt(dimsOut.match(/pixelWidth:\s*(\d+)/)?.[1] ?? outW)
+  const actualH = parseInt(dimsOut.match(/pixelHeight:\s*(\d+)/)?.[1] ?? outH)
+  if (actualW === outW && actualH === outH) return path
 
-    // Check actual dims
-    const dimsOut = execFileSync(
-      'sips',
-      ['-g', 'pixelWidth', '-g', 'pixelHeight', path],
-      { encoding: 'utf8' },
-    )
-    const actualW = parseInt(dimsOut.match(/pixelWidth:\s*(\d+)/)?.[1] ?? targetW)
-    const actualH = parseInt(dimsOut.match(/pixelHeight:\s*(\d+)/)?.[1] ?? targetH)
-
-    let finalPath = path
-    if (actualW !== targetW || actualH !== targetH) {
-      const resized = tempPath()
-      await execFileAsync('sips', [
-        '-z', String(targetH), String(targetW), path, '--out', resized,
-      ])
-      safeUnlink(path)
-      finalPath = resized
-    }
-
-    const base64 = readFileSync(finalPath).toString('base64')
-    safeUnlink(finalPath)
-    return { base64, width: targetW, height: targetH }
-  } catch (err) {
-    safeUnlink(path)
-    throw err
-  }
+  const resized = tempPath()
+  await execFileAsync('sips', ['-z', String(outH), String(outW), path, '--out', resized])
+  safeUnlink(path)
+  return resized
 }
 
 /**
- * Capture a region of the screen (logical coordinates) and return as base64 JPEG.
+ * Capture a rect given in GLOBAL POINTS and return it as base64 JPEG scaled to
+ * outW×outH.
+ *
+ * `screencapture -R` takes POINTS (not pixels) and captures at the display's
+ * native backing scale, so this one primitive serves both whole-display and
+ * zoom captures — and it uses the very same point rects the pointer code uses.
  */
-async function captureRegionToBase64(x, y, w, h, outW, outH) {
+async function capturePointRect(rect, outW, outH) {
   const path = tempPath()
   try {
-    // -R x,y,w,h uses logical screen coordinates
     await execFileAsync('screencapture', [
       '-t', 'jpg', '-x',
-      '-R', `${Math.round(x)},${Math.round(y)},${Math.round(w)},${Math.round(h)}`,
+      '-R', [rect.x, rect.y, rect.w, rect.h].map(n => Math.round(n)).join(','),
       path,
     ])
-
-    const dimsOut = execFileSync(
-      'sips',
-      ['-g', 'pixelWidth', '-g', 'pixelHeight', path],
-      { encoding: 'utf8' },
-    )
-    const actualW = parseInt(dimsOut.match(/pixelWidth:\s*(\d+)/)?.[1] ?? outW)
-    const actualH = parseInt(dimsOut.match(/pixelHeight:\s*(\d+)/)?.[1] ?? outH)
-
-    let finalPath = path
-    if (actualW !== outW || actualH !== outH) {
-      const resized = tempPath()
-      await execFileAsync('sips', [
-        '-z', String(outH), String(outW), path, '--out', resized,
-      ])
-      safeUnlink(path)
-      finalPath = resized
-    }
-
+    const finalPath = await resizeIfNeeded(path, outW, outH)
     const base64 = readFileSync(finalPath).toString('base64')
     safeUnlink(finalPath)
     return { base64, width: outW, height: outH }
@@ -192,16 +148,19 @@ export const tcc = {
 }
 
 export const display = {
-  /** Get logical dimensions + scaleFactor for the given display (0 = main). */
+  /** Geometry for the given display (0 = primary). Dimensions are in points. */
   getSize(displayId) {
-    const screens = getDisplayInfo()
-    const idx = displayId != null && displayId < screens.length ? displayId : 0
-    return screens[idx] ?? screens[0]
+    return toLegacyShape(geometry.getDisplay(displayId))
   },
 
   /** List all displays. */
   listAll() {
-    return getDisplayInfo()
+    return geometry.getDisplays().map(toLegacyShape)
+  },
+
+  /** Re-read geometry after a display hot-plug or resolution change. */
+  refresh() {
+    return geometry.refreshDisplays().map(toLegacyShape)
   },
 }
 
@@ -224,15 +183,20 @@ export const screenshot = {
         await new Promise(r => setTimeout(r, 300))
       } catch (_) {}
     }
-    return screenshotToBase64(targetW, targetH, displayId)
+    // Capture the selected display by its own point rect. This avoids
+    // `screencapture -D`, whose display ordering does not necessarily match
+    // NSScreen ordering, and guarantees the captured area is exactly the rect
+    // that pointer coordinates are mapped against.
+    const d = geometry.getDisplay(displayId)
+    return capturePointRect(d.points, targetW, targetH)
   },
 
   /**
-   * Capture a screen region.
-   * x, y, w, h are in LOGICAL point coordinates (not physical pixels).
+   * Capture a screen region. x, y, w, h are in GLOBAL POINTS (top-left origin),
+   * matching `screencapture -R` and the CG mouse APIs.
    */
   async captureRegion(_allowedBundleIds, x, y, w, h, outW, outH, _quality, _displayId) {
-    return captureRegionToBase64(x, y, w, h, outW, outH)
+    return capturePointRect({ x, y, w, h }, outW, outH)
   },
 }
 

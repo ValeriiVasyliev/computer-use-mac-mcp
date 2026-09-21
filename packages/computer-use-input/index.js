@@ -65,23 +65,12 @@ function jxaSync(script) {
   ).trim()
 }
 
-// Cache scale factor — changes only on display hot-plug which is rare
-let _scaleFactor = null
-
-function getScaleFactor() {
-  if (_scaleFactor !== null) return _scaleFactor
-  try {
-    _scaleFactor = parseFloat(jxaSync(`
-      ObjC.import("AppKit");
-      String($.NSScreen.mainScreen.backingScaleFactor);
-    `)) || 1
-  } catch {
-    _scaleFactor = 1
-  }
-  return _scaleFactor
-}
-
-// ── Cursor position helpers (logical → physical) ───────────────────────────
+// ── Cursor position helpers ────────────────────────────────────────────────
+//
+// Everything in this module speaks GLOBAL POINTS (top-left origin) — the native
+// coordinate space of the CoreGraphics event APIs below. It deliberately knows
+// nothing about Retina scale factors or screenshot dimensions; converting from
+// the public screenshot space happens exactly once, in computer-use-geometry.
 
 function getCursorLogical() {
   const out = jxaSync(`
@@ -99,14 +88,14 @@ function getCursorLogical() {
 export const isSupported = true
 
 /**
- * Move the mouse cursor to (x, y) in physical-pixel screenshot coordinates.
- * Divides by scaleFactor to obtain logical Quartz point coordinates.
+ * Move the mouse cursor to (x, y) in GLOBAL POINTS (top-left origin) — the
+ * coordinate space CGWarpMouseCursorPosition itself uses. No scaling is applied
+ * here; callers convert from screenshot space via computer-use-geometry.
  */
 export async function moveMouse(x, y, _interpolated) {
-  const sf = getScaleFactor()
   await jxa(`
     ObjC.import("CoreGraphics");
-    $.CGWarpMouseCursorPosition({x: ${x / sf}, y: ${y / sf}});
+    $.CGWarpMouseCursorPosition({x: ${x}, y: ${y}});
     $.CGAssociateMouseAndMouseCursorPosition(1);
   `)
 }
@@ -176,12 +165,11 @@ export async function mouseScroll(amount, axis) {
 }
 
 /**
- * Returns the current cursor position in physical-pixel screenshot coordinates.
+ * Returns the current cursor position in GLOBAL POINTS (top-left origin).
+ * Callers convert to screenshot space via computer-use-geometry.
  */
 export async function mouseLocation() {
-  const logical = getCursorLogical()
-  const sf = getScaleFactor()
-  return { x: logical.x * sf, y: logical.y * sf }
+  return getCursorLogical()
 }
 
 /**

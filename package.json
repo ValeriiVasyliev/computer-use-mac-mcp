@@ -8,7 +8,9 @@
     "computer-use-mac-mcp": "./index.js"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test test/",
+    "calibrate": "node scripts/calibrate.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
@@ -16,7 +18,18 @@
   "engines": {
     "node": ">=18"
   },
-  "os": ["darwin"],
-  "keywords": ["macos", "mcp", "computer-use", "automation", "screenshot", "mouse", "keyboard", "claude"],
+  "os": [
+    "darwin"
+  ],
+  "keywords": [
+    "macos",
+    "mcp",
+    "computer-use",
+    "automation",
+    "screenshot",
+    "mouse",
+    "keyboard",
+    "claude"
+  ],
   "license": "MIT"
 }
