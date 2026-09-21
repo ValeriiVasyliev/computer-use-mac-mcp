@@ -120,3 +120,6 @@ export declare function resolvePrepareCapture(
   autoResolve?: boolean,
   doHide?: boolean,
 ): Promise<unknown>
+
+/** True if `id` is a well-formed reverse-DNS bundle identifier. */
+export declare function isValidBundleId(id: unknown): boolean

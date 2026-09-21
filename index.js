@@ -22,7 +22,10 @@
  * Requires macOS with Screen Recording + Accessibility permissions granted.
  */
 
-import { execFile } from 'child_process'
+import { execFile, execFileSync } from 'child_process'
+import { readFileSync } from 'fs'
+import { dirname, join } from 'path'
+import { fileURLToPath } from 'url'
 import { promisify } from 'util'
 
 import {
@@ -40,6 +43,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 
 const execFileAsync = promisify(execFile)
+
+/** Reported over MCP, read from package.json so the two cannot drift apart. */
+const VERSION = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'package.json'), 'utf8'),
+).version
 
 // ── Clipboard helpers ──────────────────────────────────────────────────────
 
@@ -71,9 +79,31 @@ async function moveAndSettle(x, y) {
   await sleep(MOVE_SETTLE_MS)
 }
 
+/**
+ * Clipboard contents we displaced and still owe the user, held so that an exit
+ * between the overwrite and the restore does not strand pasted text — which may
+ * be whatever the agent was asked to type — in their clipboard.
+ */
+let pendingClipboardRestore = null
+
+function restoreClipboardSync() {
+  if (pendingClipboardRestore === null) return
+  const saved = pendingClipboardRestore
+  pendingClipboardRestore = null
+  try { execFileSync('pbcopy', [], { input: saved }) } catch { /* best effort */ }
+}
+
+for (const signal of ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    restoreClipboardSync()
+    if (signal !== 'exit') process.exit(0)
+  })
+}
+
 async function typeViaClipboard(text) {
   let saved
   try { saved = await readClipboard() } catch { /* ignore */ }
+  if (typeof saved === 'string') pendingClipboardRestore = saved
   try {
     await writeClipboard(text)
     if ((await readClipboard()) !== text) throw new Error('Clipboard write did not round-trip.')
@@ -82,6 +112,10 @@ async function typeViaClipboard(text) {
   } finally {
     if (typeof saved === 'string') {
       try { await writeClipboard(saved) } catch { /* ignore */ }
+      pendingClipboardRestore = null
+    } else {
+      // Nothing to put back, but do not leave the typed text sitting there.
+      try { await writeClipboard('') } catch { /* ignore */ }
     }
   }
 }
@@ -240,7 +274,7 @@ async function main() {
   const coordinateMode = 'pixels'
 
   const server = new Server(
-    { name: 'computer-use', version: '0.1.0' },
+    { name: 'computer-use', version: VERSION },
     { capabilities: { tools: {} } },
   )
 

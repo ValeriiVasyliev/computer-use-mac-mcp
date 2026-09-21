@@ -17,6 +17,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 
 import * as geometry from '../computer-use-geometry/index.js'
+import { sentinelAppRules } from './sentinelApps.js'
 
 /** Coordinate tracing is noisy; opt in with CU_DEBUG_COORDS=1. */
 const DEBUG_COORDS = process.env.CU_DEBUG_COORDS === '1'
@@ -49,10 +50,47 @@ export const API_RESIZE_PARAMS = {}
  */
 export const ZOOM_BOX_SHOT_PX = 200
 
-/** Sentinel category for apps that should never be controlled. Returns null. */
-export function getSentinelCategory() {
+// ── Policy ─────────────────────────────────────────────────────────────────
+
+/**
+ * The category of sensitive app `bundleId` belongs to, or null if it is not a
+ * sentinel. Matching is by prefix so helper and launcher bundles of the same
+ * suite are covered too.
+ */
+export function getSentinelCategory(bundleId) {
+  if (typeof bundleId !== 'string' || !bundleId) return null
+  const id = bundleId.toLowerCase()
+  for (const rule of sentinelAppRules) {
+    if (id.startsWith(rule.prefix.toLowerCase())) return rule.category
+  }
   return null
 }
+
+/** Sentinel blocking is on unless explicitly disabled. */
+export function sentinelBlockingEnabled(env = process.env) {
+  return env.CU_ALLOW_SENTINEL_APPS !== '1'
+}
+
+/**
+ * The operator-configured allowlist, from CU_ALLOWED_APPS (comma-separated
+ * bundle IDs). Returns null when unset, meaning "no operator restriction" —
+ * which is the historical behaviour, not an empty allowlist.
+ */
+export function readAllowedAppsPolicy(env = process.env) {
+  const raw = env.CU_ALLOWED_APPS
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  const ids = raw.split(',').map(s => s.trim()).filter(Boolean)
+  return ids.length > 0 ? ids : null
+}
+
+/** Tools that drive the machine. Gated by both policies below. */
+const ACTING_TOOLS = new Set([
+  'left_click', 'right_click', 'middle_click', 'double_click',
+  'left_click_drag', 'type', 'key', 'hold_key', 'scroll',
+])
+
+/** Tools that read the screen. Gated by the sentinel policy only. */
+const CAPTURING_TOOLS = new Set(['screenshot', 'zoom'])
 
 /**
  * Compute the target image dimensions for a screenshot.
@@ -263,9 +301,12 @@ export function buildComputerUseTools(capabilities, mode, installedAppNames) {
     {
       name: 'request_access',
       description:
-        'Request permission to control specific applications.' +
-        ' Call this FIRST before any other computer-use tool.' +
-        ' The user will approve or deny access for each app.' +
+        'Declare which applications you intend to control, and bring the first' +
+        ' of them to the front. Call this FIRST before any other computer-use' +
+        ' tool.' +
+        ' Note: this server grants the declared apps automatically — no human is' +
+        ' prompted, and the grant does not confine later clicks or keystrokes to' +
+        ' those apps unless the operator set CU_ALLOWED_APPS.' +
         appListHint(installedAppNames),
       inputSchema: {
         type: 'object',
@@ -313,13 +354,26 @@ export function buildComputerUseTools(capabilities, mode, installedAppNames) {
 /**
  * Minimal ComputerUseSessionContext for standalone subprocess MCP server mode.
  * No UI, no lock management, no React context required.
- * - Auto-approves request_access (the calling agent is responsible for trust)
- * - Maintains screenshot dims + allowed-app list in memory for the process lifetime
+ *
+ * There is no human in this loop to answer a permission prompt, so
+ * request_access cannot be a user-facing gate here. It resolves as follows:
+ *
+ *   - CU_ALLOWED_APPS unset  → every declared app is granted (the calling agent
+ *     is the trust boundary). The tool description says so plainly.
+ *   - CU_ALLOWED_APPS set    → only apps on that operator-supplied list are
+ *     granted, anything else is denied, and acting tools additionally refuse to
+ *     fire while a non-granted app is frontmost.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
  */
-export function createSubprocessCtx() {
+export function createSubprocessCtx(env = process.env) {
   let lastScreenshotDims = null
   let allowedApps = []
   let selectedDisplayId = undefined
+  const policy = readAllowedAppsPolicy(env)
+  const sentinelBlocking = sentinelBlockingEnabled(env)
+  const permitted = id =>
+    policy === null || policy.some(p => id === p || id.startsWith(p + '.'))
 
   return {
     getLastScreenshotDims: () => lastScreenshotDims,
@@ -330,14 +384,21 @@ export function createSubprocessCtx() {
     acquireCuLock: async () => {},
     formatLockHeldMessage: () => 'Computer use is locked by another session.',
     getSelectedDisplayId: () => selectedDisplayId,
-    // Auto-approve: grant access to every app the agent requested
-    onPermissionRequest: async (req) => ({
-      granted: (req.apps ?? []).map(a => ({
+    /** Operator allowlist (when set) is the only thing that can deny here. */
+    getAllowedAppsPolicy: () => policy,
+    getSentinelBlocking: () => sentinelBlocking,
+    onPermissionRequest: async (req) => {
+      const asked = (req.apps ?? []).filter(a => a && typeof a.bundleId === 'string')
+      const shape = a => ({
         bundleId: a.bundleId,
         displayName: a.displayName || a.bundleId,
-      })),
-      flags: req.flags ?? {},
-    }),
+      })
+      return {
+        granted: asked.filter(a => permitted(a.bundleId)).map(shape),
+        denied: asked.filter(a => !permitted(a.bundleId)).map(shape),
+        flags: req.flags ?? {},
+      }
+    },
     onAllowedAppsChanged: (granted) => {
       for (const app of (granted ?? [])) {
         if (app.bundleId && !allowedApps.find(a => a.bundleId === app.bundleId)) {
@@ -454,6 +515,79 @@ export function bindSessionContext(adapter, coordinateMode, ctx) {
     return { content: [{ type: 'text', text }], telemetry: {} }
   }
 
+  function refuse(text, kind) {
+    return { content: [{ type: 'text', text }], telemetry: { error_kind: kind } }
+  }
+
+  /**
+   * Gate a tool call on what is actually frontmost right now.
+   *
+   * Granting access to an app used to be purely advisory: the grant was only
+   * ever used to raise a window, while clicks and keystrokes went wherever the
+   * pointer happened to be. Both policies are enforced here, at the point the
+   * event would be posted, because that is the only place the real target is
+   * known — the frontmost app can change between the grant and the click.
+   *
+   * Returns a refusal result, or null to proceed.
+   */
+  async function checkFrontmostPolicy(toolName) {
+    const acting = ACTING_TOOLS.has(toolName)
+    const capturing = CAPTURING_TOOLS.has(toolName)
+    if (!acting && !capturing) return null
+
+    let front = null
+    try {
+      front = await executor.getFrontmostApp?.()
+    } catch {
+      front = null
+    }
+    // Fail closed only where a policy is actually in force: with no allowlist
+    // and sentinel blocking off there is nothing to check anyway.
+    const policy = ctx.getAllowedAppsPolicy?.() ?? null
+    // Read through the context so an injected env reaches this gate; fall back
+    // to the ambient one for hosts that supply their own context.
+    const sentinels = ctx.getSentinelBlocking?.() ?? sentinelBlockingEnabled()
+    if (!front?.bundleId) {
+      if (policy === null) return null
+      return refuse(
+        'Refused: the frontmost application could not be identified, and ' +
+        'CU_ALLOWED_APPS restricts computer use to specific apps.',
+        'frontmost_unknown',
+      )
+    }
+
+    const label = front.displayName || front.bundleId
+
+    if (sentinels) {
+      const category = getSentinelCategory(front.bundleId)
+      if (category) {
+        return refuse(
+          `Refused: ${label} is a protected application (${category}). ` +
+          'Computer use does not act on or capture password managers, ' +
+          'credential prompts or authenticator apps. Set ' +
+          'CU_ALLOW_SENTINEL_APPS=1 to override this.',
+          'sentinel_app',
+        )
+      }
+    }
+
+    if (acting && policy !== null) {
+      const granted = getAllowedBundleIds()
+      const allowed = granted.some(
+        id => front.bundleId === id || front.bundleId.startsWith(id + '.'),
+      )
+      if (!allowed) {
+        return refuse(
+          `Refused: ${label} is not in the granted app list. ` +
+          'Call request_access for it first, or add it to CU_ALLOWED_APPS.',
+          'app_not_granted',
+        )
+      }
+    }
+
+    return null
+  }
+
   return async function dispatch(toolName, args) {
     const a = (args ?? {})
 
@@ -476,6 +610,9 @@ export function bindSessionContext(adapter, coordinateMode, ctx) {
         telemetry: { error_kind: 'disabled' },
       }
     }
+
+    const refusal = await checkFrontmostPolicy(toolName)
+    if (refusal) return refusal
 
     const displayId = ctx.getSelectedDisplayId()
 
@@ -659,10 +796,15 @@ export function bindSessionContext(adapter, coordinateMode, ctx) {
           const resp = await ctx.onPermissionRequest(req, null)
           ctx.onAllowedAppsChanged(resp.granted, resp.flags)
           const names = resp.granted.map(a => a.displayName || a.bundleId).join(', ')
+          const deniedNames = (resp.denied ?? [])
+            .map(a => a.displayName || a.bundleId).join(', ')
+          const suffix = deniedNames
+            ? ` Denied by the operator's CU_ALLOWED_APPS policy: ${deniedNames}.`
+            : ''
           return ok(
             resp.granted.length > 0
-              ? `Access granted for: ${names}`
-              : 'No apps selected for access',
+              ? `Access granted for: ${names}.${suffix}`
+              : `No apps were granted.${suffix || ' No apps selected for access.'}`,
           )
         }
 

@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+
+- Refuse to click, type or capture while a password manager, credential prompt
+  or authenticator app is frontmost. The sentinel list was previously an empty
+  stub, so the hook that was meant to protect these apps never fired. Matching
+  is by bundle-ID prefix; `CU_ALLOW_SENTINEL_APPS=1` opts out.
+- Enforce the granted-app list at the moment an event is posted, gated on
+  `CU_ALLOWED_APPS`. A grant used only to raise a window: clicks and keystrokes
+  went wherever the pointer was, so `request_access` did not confine anything.
+- Pass keystroke text to `osascript` as an argument instead of interpolating it
+  into script source. A quote in the text could close the string literal and
+  append arbitrary AppleScript; text beginning with `-e` was parsed as an
+  osascript option and executed as a second script.
+- Activate apps with `open -b` rather than `tell application id "…"`, and
+  validate bundle IDs against a strict reverse-DNS pattern before they reach any
+  command argument.
+- Restore the clipboard on `SIGINT`/`SIGTERM`/`SIGHUP` and on exit, and clear it
+  when there was nothing to restore, so an interrupted paste cannot strand typed
+  text in the clipboard.
+- Restrict temporary screenshot files to the owner (`0600`) for the moment they
+  exist on disk.
+
+### Changed
+
+- `request_access` no longer tells the model "the user will approve or deny
+  access for each app". No human is prompted in this server; the description now
+  says so and points at `CU_ALLOWED_APPS`.
+- The version reported over MCP is read from `package.json` instead of a
+  hard-coded `0.1.0`.
+
+### Added
+
+- `README.md` section documenting the trust model and both environment controls.
+- 17 policy tests covering sentinel classification, allowlist parsing, bundle-ID
+  validation and the dispatch gate (37 tests total).
 
 ## [0.2.0] - 2026-09-21
 

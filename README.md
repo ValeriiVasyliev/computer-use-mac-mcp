@@ -136,6 +136,42 @@ switch_display { "display": 1 }
 
 After switching, subsequent `screenshot` and click tools target the selected display.
 
+## Security
+
+This server can see your whole screen and can type and click anywhere in your
+logged-in session. Synthetic events are indistinguishable from your own to the
+apps receiving them, so treat granting it to an agent as you would handing over
+the keyboard. Two controls are built in.
+
+**Protected apps (on by default).** Clicks, keystrokes and screen captures are
+refused while a password manager, credential prompt or authenticator app is
+frontmost — a screenshot of an unlocked vault is a plaintext dump of it. The
+list lives in `packages/computer-use-mcp/sentinelApps.js` and matches by
+bundle-ID prefix. To turn this off:
+
+```bash
+CU_ALLOW_SENTINEL_APPS=1
+```
+
+**Restricting which apps can be driven (off by default).** `request_access` has
+no human to ask in this server: by default it grants whatever the agent declares,
+and the grant does not confine later input. Set an allowlist to make it binding:
+
+```bash
+CU_ALLOWED_APPS="com.apple.Safari,com.apple.Notes"
+```
+
+With it set, `request_access` grants only listed apps, and acting tools refuse
+to fire unless the app that would receive the event is one of them — checked at
+the moment of the click, since the frontmost app can change after the grant.
+
+Two limits worth knowing:
+
+- `screenshot` captures the whole display, so an allowlist does not keep
+  non-allowed apps out of the image. Only the protected-app rule blocks capture.
+- The allowlist is an operator control, read from the environment. The agent
+  cannot widen it, but it is not a substitute for trusting the agent you connect.
+
 ## How it works
 
 Three packages under `packages/`:

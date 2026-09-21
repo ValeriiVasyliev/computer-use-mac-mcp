@@ -65,6 +65,50 @@ function jxaSync(script) {
   ).trim()
 }
 
+// ── Safe keystroke dispatch ────────────────────────────────────────────────
+//
+// Text is handed to osascript as an argv entry and read back via `run(argv)`.
+// Interpolating it into the script source instead would let a quote in the text
+// close the string literal and append arbitrary AppleScript, so nothing
+// caller-supplied is ever concatenated into a script below.
+
+/** JXA modifier names accepted by System Events' `keystroke ... using`. */
+const AS_MODIFIER_NAMES = {
+  command: 'command down', cmd: 'command down',
+  control: 'control down', ctrl: 'control down',
+  shift: 'shift down',
+  option: 'option down', alt: 'option down',
+}
+
+const KEYSTROKE_JXA = `
+  function run(argv) {
+    // argv[0] is the "-" programfile placeholder (see keystrokeViaArgv).
+    var text = argv[1]
+    var mods = argv.slice(2)
+    var se = Application("System Events")
+    if (mods.length > 0) se.keystroke(text, { using: mods })
+    else se.keystroke(text)
+    return "ok"
+  }
+`
+
+/**
+ * Send `text` through System Events, holding `modifierNames` (already mapped to
+ * AppleScript names). Both travel as arguments, not as script source.
+ *
+ * The bare "-" is load-bearing: it fills osascript's `programfile` slot so that
+ * everything after it is an argument. Without it, text beginning with a dash is
+ * parsed as an option — `typeText('-e …')` would hand osascript a second script
+ * to execute rather than typing those characters.
+ */
+async function keystrokeViaArgv(text, modifierNames) {
+  await execFileAsync('osascript', [
+    '-l', 'JavaScript',
+    '-e', KEYSTROKE_JXA,
+    '-', String(text), ...modifierNames,
+  ])
+}
+
 // ── Cursor position helpers ────────────────────────────────────────────────
 //
 // Everything in this module speaks GLOBAL POINTS (top-left origin) — the native
@@ -225,22 +269,13 @@ export async function keys(parts) {
       "ok"
     `)
   } else {
-    // Fallback: AppleScript keystroke for characters not in the key-code table
-    const modsAS = mods.map(m => {
-      const map = {
-        command: 'command', cmd: 'command',
-        control: 'control', ctrl: 'control',
-        shift: 'shift',
-        option: 'option', alt: 'option',
-      }
-      return `${map[m] || m} down`
-    }).join(', ')
-    const usingClause = modsAS ? ` using {${modsAS}}` : ''
-    const escaped = mainKey.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-    await execFileAsync('osascript', [
-      '-e',
-      `tell application "System Events" to keystroke "${escaped}"${usingClause}`,
-    ])
+    // Fallback for characters with no key code: System Events keystroke.
+    // The text travels as an argv entry, never as script source, so it cannot
+    // terminate the string literal and inject further AppleScript.
+    const modifierNames = mods
+      .map(m => AS_MODIFIER_NAMES[m])
+      .filter(Boolean)
+    await keystrokeViaArgv(mainKey, modifierNames)
   }
 }
 
@@ -249,11 +284,7 @@ export async function keys(parts) {
  * Uses System Events keystroke for reliable Unicode support.
  */
 export async function typeText(text) {
-  const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-  await execFileAsync('osascript', [
-    '-e',
-    `tell application "System Events" to keystroke "${escaped}"`,
-  ])
+  await keystrokeViaArgv(text, [])
 }
 
 /**

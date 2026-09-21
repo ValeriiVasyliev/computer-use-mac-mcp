@@ -41,6 +41,10 @@ export interface CuCallToolResult {
 
 export interface ComputerUseSessionContext {
   getAllowedApps(): CuAllowedApp[]
+  /** Operator allowlist from CU_ALLOWED_APPS, or null when unrestricted. */
+  getAllowedAppsPolicy?(): string[] | null
+  /** Whether protected (sentinel) apps are refused. */
+  getSentinelBlocking?(): boolean
   getGrantFlags(): CuGrantFlags
   getUserDeniedBundleIds(): string[]
   getSelectedDisplayId(): number | undefined
@@ -72,7 +76,9 @@ export interface CuSubGates {
 
 export declare const DEFAULT_GRANT_FLAGS: CuGrantFlags
 export declare const API_RESIZE_PARAMS: Record<string, unknown>
-export declare function getSentinelCategory(): null
+export declare function getSentinelCategory(bundleId: string): string | null
+export declare function sentinelBlockingEnabled(env?: NodeJS.ProcessEnv): boolean
+export declare function readAllowedAppsPolicy(env?: NodeJS.ProcessEnv): string[] | null
 export declare function targetImageSize(physW: number, physH: number, params: unknown): [number, number]
 export declare function buildComputerUseTools(
   capabilities: unknown,
@@ -92,4 +98,6 @@ export declare function bindSessionContext(
   ctx: ComputerUseSessionContext,
 ): (toolName: string, args: unknown) => Promise<CuCallToolResult>
 
-export declare function createSubprocessCtx(): ComputerUseSessionContext
+export declare function createSubprocessCtx(
+  env?: NodeJS.ProcessEnv,
+): ComputerUseSessionContext

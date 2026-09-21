@@ -11,7 +11,7 @@
  */
 
 import { execFileSync, execFile } from 'child_process'
-import { readFileSync, unlinkSync, existsSync } from 'fs'
+import { readFileSync, unlinkSync, existsSync, chmodSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { promisify } from 'util'
@@ -49,6 +49,19 @@ function toLegacyShape(d) {
     points: d.points,
     pixels: d.pixels,
   }
+}
+
+// ── Bundle ID validation ───────────────────────────────────────────────────
+
+/**
+ * Reverse-DNS bundle identifier, e.g. "com.apple.Safari". Deliberately strict:
+ * letters, digits, hyphens and dots only, so nothing that reaches a command
+ * argument can be mistaken for a flag or carry shell/AppleScript metacharacters.
+ */
+const BUNDLE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/
+
+export function isValidBundleId(id) {
+  return typeof id === 'string' && BUNDLE_ID_RE.test(id) && !id.startsWith('-')
 }
 
 // ── Screenshot helpers ─────────────────────────────────────────────────────
@@ -97,6 +110,9 @@ async function capturePointRect(rect, outW, outH) {
       path,
     ])
     const finalPath = await resizeIfNeeded(path, outW, outH)
+    // The capture can contain anything on screen; keep it owner-only for the
+    // moment it exists on disk.
+    try { chmodSync(finalPath, 0o600) } catch { /* best effort */ }
     const base64 = readFileSync(finalPath).toString('base64')
     safeUnlink(finalPath)
     return { base64, width: outW, height: outH }
@@ -174,12 +190,14 @@ export const screenshot = {
    * @param {number} [displayId] - 0-indexed display to capture (0 = main, 1 = first external, …)
    */
   async captureExcluding(allowedBundleIds, _quality, targetW, targetH, displayId) {
-    // Activate the first allowed app so the screenshot shows the target, not the terminal
-    if (allowedBundleIds?.length > 0) {
+    // Activate the first allowed app so the screenshot shows the target, not the
+    // terminal. `open -b` takes the bundle ID as an argv entry, so unlike the
+    // AppleScript this replaces there is no script source for a quote in the ID
+    // to escape from. The format check rejects anything that is not a plausible
+    // bundle ID before it reaches the command at all.
+    if (allowedBundleIds?.length > 0 && isValidBundleId(allowedBundleIds[0])) {
       try {
-        await execFileAsync('osascript', [
-          '-e', `tell application id "${allowedBundleIds[0]}" to activate`,
-        ], { timeout: 2000 })
+        await execFileAsync('open', ['-b', allowedBundleIds[0]], { timeout: 2000 })
         await new Promise(r => setTimeout(r, 300))
       } catch (_) {}
     }
@@ -312,6 +330,9 @@ export const apps = {
 
   /** Open an application by bundle ID. */
   async open(bundleId) {
+    if (!isValidBundleId(bundleId)) {
+      throw new Error(`Invalid bundle ID: ${JSON.stringify(bundleId)}`)
+    }
     await execFileAsync('open', ['-b', bundleId])
   },
 }
